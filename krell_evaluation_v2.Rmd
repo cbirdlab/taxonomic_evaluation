@@ -1,0 +1,1275 @@
+---
+title: "Evaluation of Taxonomic Assignment Packages V2"
+author: "Evan Krell, Chris Bird, Martin French"
+date: "November 27, 2016"
+output: html_document
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Libraries
+library ("pracma")  # For string manipulation functions
+library("stringr")
+library(VennDiagram)
+library("ggplot2")
+library("Vennerable")
+
+```
+
+## Database used
+
+The database used for taxonomic assignment is the pre-built nucleotide BLAST database from NCBI.
+
+https://blast.ncbi.nlm.nih.gov/Blast.cgi?CMD=Web&PAGE_TYPE=BlastDocs&DOC_TYPE=Download
+
+Filter options were used to reduce the database to only mitochondrial DNA. 
+An entrez query was made to download the GI numbers for those sequences, with the the following command:
+
+    wget 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=nuccore&term=mitochondria or cytochrome \\
+    or coi or co1 or cox1 or coxi or "mitochondrial genome" or "mitochondria genome"&retmax=4933739'
+
+
+## Sources of taxonomic assignment
+
+*Vsearch*
+
+https://github.com/torognes/vsearch
+
+Command used:
+
+    vsearch --db ../nr_mito.fasta --id .7 \\
+    --userout OTU.vsearched.userout --usearch_global \\
+    /media/Wapuilani/evan/Charybdis_Runs/Combined/out/Simons.combo.nonchimeras.clean.OTU.cluster.fasta
+  
+
+*Ecotag*
+
+http://metabarcoding.org/obitools/doc/scripts/ecotag.html
+
+Command used:
+
+    ecotag -R /media/Wapuilani/Databases/FILTER_BLASTDB/ecopcrdb/db_clean_uniq_valid.fasta -m .7 \\
+    -t /media/Wapuilani/Databases/NCBI_TAXO \\
+    -r /media/Wapuilani/evan/Charybdis_Runs/Combined/out/Simons.combo.nonchimeras.clean.OTU.cluster.fasta
+
+*Blast*
+
+https://blast.ncbi.nlm.nih.gov/Blast.cgi
+
+Command used:
+
+    blastn -query /media/Wapuilani/evan/Charybdis_Runs/Combined/out/Simons.combo.nonchimeras.clean.OTU.cluster.fasta \\
+    -db ./nr_mito > Simons_NDB.blast.csv
+
+
+
+## Load and prepare data
+
+In this section, the data sources are loaded and processed in various ways to get them ready for evaluation.
+Care is taken to make sure that all data are as consistent as possible. 
+By using a common database, all taxonomic assignment software use the same GI numbers to identify the assigned reference sequences. 
+
+```{r load}
+
+#########################################################
+# Load data common to all taxonomic assignment software #
+#########################################################
+
+setwd("~/taxonomic_evalutation/data")
+
+###
+# OTUs_seqs_samples: 
+# 
+# Every row has a unique sequence, the corrosponding OTU, 
+# the ID of the source sample, and the count generated during a PCR-error corrective
+# clustering step. Not to be confused with the count from clustering OTUs with CROP,
+# whose count includes the PCR-error cluster count. 
+###
+
+OTUs_seqs_file <- "Simons.combo.nonchimeras.clean.OTU.samples_counts.BEST.csv"
+OTUs_seqs_samples <- read.table (file = OTUs_seqs_file, header = FALSE, sep = ',', stringsAsFactors = FALSE)
+colnames (OTUs_seqs_samples) <- c ("OTU_SEQID", "QSEQID", "SAMPLE_ID", "COUNT")
+
+###
+# OTUs_seqs: 
+#
+# A simplified form of OTUs_seqs_samples
+# Simply maps sequences to their corrosponding OTUs
+###
+
+
+OTUs_seqs <- OTUs_seqs_samples[, c ("OTU_SEQID", "QSEQID")]
+colnames (OTUs_seqs) <- c ("OTU_SEQID", "QSEQID")
+
+###
+# OTUs
+#
+# Simply a list of all OTUs
+###
+
+OTUs <- OTUs_seqs[!duplicated (OTUs_seqs$OTU_SEQID),]
+OTUs <- as.list (OTUs$OTU_SEQID)
+
+###
+# Sample_IDs
+#
+# A list of Sample IDs
+###
+
+samples_file <- "Simons.samples.txt"
+samples <- unlist (as.list (read.table (file = samples_file, header = FALSE, stringsAsFactors = FALSE)))
+samples <- make.names (samples)
+
+
+###
+# Predators_Samples
+#
+# Table with samples and the predator associated.
+###
+
+pred_file <- "Predators.csv"
+Predators_Samples <- read.table (file = pred_file, header = TRUE, sep = ',', stringsAsFactors = FALSE)
+
+##################################################
+# Load data resulting from taxonomic assignment  #
+##################################################
+
+setwd("~/taxonomic_evalutation/newdata/")
+
+
+###
+# ovt_XXX: 
+#
+# OTUs VS Tubes file. 
+# Each row is an OTU, the results of taxonomic assignment 
+# and the read count at a particular sample ID
+###
+
+ovt_vsearch_file <- "Simons_NDB.OVT.ann.vsearch.csv"
+ovt_ecotag_file <- "Simons_NDB.OVT.ann.ecotag.csv"
+ovt_blast_file <- "Simons_NDB.OVT.ann.blast.csv"
+ovt_vsearch <- read.table (file = ovt_vsearch_file, header = TRUE, sep = ',', stringsAsFactors = FALSE)
+ovt_ecotag <- read.table (file = ovt_ecotag_file, header = TRUE, sep = ',', stringsAsFactors = FALSE)
+ovt_blast <- read.table (file = ovt_blast_file,  header = TRUE, sep = ',', stringsAsFactors = FALSE)
+
+# Fix colname inconsistency
+ovt_vsearch$X <- NULL
+colnames (ovt_vsearch)[1:3] <- c ("OTU_SEQID", "OTU_SEQUENCE", "REF_SEQID")
+ovt_ecotag$X <- NULL
+ovt_ecotag <- ovt_ecotag[,c(1,2,4,3,5:ncol(ovt_ecotag))]
+colnames (ovt_ecotag)[1:3] <- c ("OTU_SEQID", "OTU_SEQUENCE", "REF_SEQID")
+ovt_blast$X.1 <- NULL
+colnames (ovt_blast)[1:3] <- c ("OTU_SEQID", "OTU_SEQUENCE", "REF_SEQID")
+
+# Remove unassigned sequences from ecotag results
+ovt_ecotag <- ovt_ecotag[ovt_ecotag$NCBI_TAXID != '1',]
+
+# Use to query just the samples in an ovt_XXX
+sample_vsearch_idx <- match(samples, colnames(ovt_vsearch))
+sample_vsearch_idx <- sort(c(sample_vsearch_idx, sample_vsearch_idx)) 
+sample_ecotag_idx <- match(samples, colnames(ovt_ecotag))
+sample_ecotag_idx <- sort(c(sample_ecotag_idx, sample_ecotag_idx)) 
+sample_blast_idx <- match(samples, colnames(ovt_blast))
+sample_blast_idx <- sort(c(sample_blast_idx, sample_blast_idx)) 
+
+###
+# charon_XXX:
+#
+# The Charon file format is a specification for a CSV
+# that organizes the results of taxonomic assignment from various
+# programs into a common format. 
+# Is used as input to the production of OTUs VS Tubes.
+#
+# Contains the OTU sequence ID, The reference sequence ID, the assigned scientific name, 
+# the assigned NCBI taxonomy ID, the sample ID, and the PCR-error correction merge count 
+###
+
+charon_vsearch_file <- "Simons_NDB.charon.vsearch.csv"
+charon_ecotag_file <- "Simons_NDB.charon.ecotag.csv"
+charon_blast_file <- "Simons_NDB.charon.blast.csv"
+charon_vsearch <- read.table (file = charon_vsearch_file, header = FALSE, sep = ',', stringsAsFactors = FALSE)
+charon_ecotag <- read.table (file = charon_ecotag_file, header = FALSE, sep = ',', stringsAsFactors = FALSE)
+charon_blast <- read.table (file = charon_blast_file, header = FALSE, sep = ',', stringsAsFactors = FALSE)
+colnames (charon_vsearch) <- c ("QUERY_SEQID", "REFERENCE_SEQID", "SCINAME", "NCBI_TAXID", "SAMPLE_ID", "COUNT", "OTU_SEQID")
+colnames (charon_ecotag) <- c ("QUERY_SEQID", "REFERENCE_SEQID", "SCINAME", "NCBI_TAXID", "SAMPLE_ID", "COUNT", "OTU_SEQID")
+colnames (charon_blast) <- c ("QUERY_SEQID", "REFERENCE_SEQID", "SCINAME", "NCBI_TAXID", "SAMPLE_ID", "COUNT", "OTU_SEQID")
+
+# Remove unassigned sequences from ecotag results
+charon_ecotag <- charon_ecotag[charon_ecotag$NCBI_TAXID != '1',]
+
+# Fix formatting of Reference Sequence ID: Only have GI
+# Specifically, the Ecotag results cut off part of the entire reference sequence ID,
+# but only the GI is required for a unique comparison
+ovt_vsearch$REF_SEQID <- str_split_fixed (ovt_vsearch$REF_SEQID, "\\|", 4)[,2]
+ovt_ecotag$REF_SEQID <- str_split_fixed (ovt_ecotag$REF_SEQID, "\\|", 4)[,2]
+ovt_blast$REF_SEQID <- str_split_fixed (ovt_blast$REF_SEQID, "\\|", 4)[,2]
+charon_vsearch$REFERENCE_SEQID <- str_split_fixed (charon_vsearch$REFERENCE_SEQID, "\\|", 4)[,2]
+charon_ecotag$REFERENCE_SEQID <- str_split_fixed (charon_ecotag$REFERENCE_SEQID, "\\|", 4)[,2]
+charon_blast$REFERENCE_SEQID <- str_split_fixed (charon_blast$REFERENCE_SEQID, "\\|", 4)[,2]
+
+
+###
+# otu_data_XXX:
+#
+# Where Charon has data for each original sequence,
+# this file compressed that information into only the OTUs.
+# Contains the OTU sequence ID, the reference sequence ID, 
+# assigned scientific name, and assigned NCBI taxonomy ID
+###  -- Do we really need this?
+
+otu_data_vsearch <- charon_vsearch[with(charon_vsearch, order(charon_vsearch$OTU_SEQID)), ]
+otu_data_vsearch <- otu_data_vsearch[!duplicated (otu_data_vsearch$OTU_SEQID),]
+otu_data_vsearch$QUERY_SEQID <- NULL
+otu_data_vsearch$SAMPLE_ID <- NULL
+otu_data_vsearch$COUNT <- NULL
+
+otu_data_ecotag <- charon_ecotag[with(charon_ecotag, order(charon_ecotag$OTU_SEQID)), ]
+otu_data_ecotag <- otu_data_ecotag[!duplicated (otu_data_ecotag$OTU_SEQID),]
+otu_data_ecotag$QUERY_SEQID <- NULL
+otu_data_ecotag$SAMPLE_ID <- NULL
+otu_data_ecotag$COUNT <- NULL
+
+otu_data_blast <- charon_blast[with(charon_blast, order(charon_blast$OTU_SEQID)), ]
+otu_data_blast <- otu_data_blast[!duplicated (otu_data_blast$OTU_SEQID),]
+otu_data_blast$QUERY_SEQID <- NULL
+otu_data_blast$SAMPLE_ID <- NULL
+otu_data_blast$COUNT <- NULL
+
+```
+
+# Part 1: Before Filtering
+
+## Overview
+
+```{r compare}
+total_OTUs <- length (OTUs)
+
+uniq_vsearch_tseqs <- unique(ovt_vsearch$REF_SEQID)
+uniq_ecotag_tseqs <- unique(ovt_ecotag$REF_SEQID)
+uniq_blast_tseqs <- unique(ovt_blast$REF_SEQID)
+
+uniq_vsearch_tseqs_len <- length (uniq_vsearch_tseqs)
+uniq_ecotag_tseqs_len <- length (uniq_ecotag_tseqs)
+uniq_blast_tseqs_len <- length (uniq_blast_tseqs)
+
+intersect_len_EV <- length (intersect (uniq_vsearch_tseqs, uniq_ecotag_tseqs))
+interset_len_EB <- length (intersect (uniq_blast_tseqs, uniq_ecotag_tseqs))
+intersect_len_VB <- length (intersect (uniq_vsearch_tseqs, uniq_blast_tseqs))
+inter <- intersect (uniq_vsearch_tseqs, uniq_ecotag_tseqs)
+intersect_len <- length (intersect (inter, uniq_blast_tseqs))
+
+un <- union(uniq_vsearch_tseqs, uniq_ecotag_tseqs)
+union_len <- length (union (un, uniq_blast_tseqs))
+
+vn <- list (0)
+vn[[1]] <- uniq_vsearch_tseqs
+vn[[2]] <- uniq_ecotag_tseqs
+vn[[3]] <- uniq_blast_tseqs
+names (vn) <- c ("Vsearch", "Ecotag", "Blast")
+
+```
+
+The following table compares the number of OTUs present in the data
+produced for each method of taxonomic assignment.
+
+In addition, the table shows the number of unique reference assignments for each
+assignment method, as well as the intersection of all three: 
+the number of OTUs that were assigned to the same reference sequence. 
+
+| | Vsearch | Ecotag  | Blast
+| - |:-:| :-:| -:
+| Number of Assigned OTUs | `r nrow (otu_data_vsearch)` | `r nrow (otu_data_ecotag)` | `r nrow (otu_data_blast)`
+| Total OTUs | `r total_OTUs` | `r total_OTUs` | `r total_OTUs`
+| Percent Assigned OTUs | `r (nrow (otu_data_vsearch)/total_OTUs)*100` | `r (nrow (otu_data_ecotag)/total_OTUs)*100` | `r (nrow (otu_data_blast)/total_OTUs)*100`
+| Unique Reference Sequences      | `r uniq_vsearch_tseqs_len` | `r uniq_ecotag_tseqs_len` | `r uniq_blast_tseqs_len`
+| Intersection of Unique Reference Sequences        | `r intersect_len`      |   `r intersect_len` | `r intersect_len` 
+| Percent References Sequences Shared | `r (intersect_len/uniq_vsearch_tseqs_len)*100`      |    `r (intersect_len/uniq_ecotag_tseqs_len)*100` | `r (intersect_len/uniq_blast_tseqs_len)*100`
+
+
+```{r venn}
+grid.newpage()
+#draw.triple.venn(area1 = uniq_vsearch_tseqs_len, area2 = uniq_ecotag_tseqs_len, area3 = uniq_blast_tseqs_len, 
+#    n12 = intersect_len_EV, n23 = interset_len_EB, n13 = intersect_len_VB, 
+#    n123 = intersect_len, category = c("Vsearch", "Ecotag", "Blast"), lty = "blank", 
+#    fill = c("#ffffb3", "red", "#bebada"), euler.d = TRUE, overrideTriple = 1, scaled = TRUE)
+
+plot (Venn(vn))
+```
+
+```{r venn_assigned_OTUs}
+
+print ("Intersection of Assigned OTUs")
+
+intersect_len_EV <- length (intersect (ovt_ecotag$OTU_SEQID, ovt_vsearch$OTU_SEQID))
+interset_len_EB <- length (intersect (ovt_ecotag$OTU_SEQID, ovt_blast$OTU_SEQID))
+intersect_len_VB <- length (intersect (ovt_blast$OTU_SEQID, ovt_vsearch$OTU_SEQID))
+inter <- intersect (ovt_ecotag$OTU_SEQID, ovt_vsearch$OTU_SEQID)
+intersect_len <- length (intersect (inter, ovt_blast$OTU_SEQID))
+
+vn_otu <- list (0)
+vn_otu[[1]] <- ovt_vsearch$OTU_SEQID
+vn_otu[[2]] <- ovt_ecotag$OTU_SEQID
+vn_otu[[3]] <- ovt_blast$OTU_SEQID
+names (vn_otu) <- c ("Vsearch", "Ecotag", "Blast")
+
+
+grid.newpage()
+#draw.triple.venn(area1 = nrow (ovt_vsearch), area2 = nrow (ovt_ecotag), area3 = nrow (ovt_blast), 
+#    n12 = intersect_len_EV, n23 = interset_len_EB, n13 = intersect_len_VB, 
+#    n123 = intersect_len, category = c("Vsearch", "Ecotag", "Blast"), lty = "blank", 
+#    fill = c("#ffffb3", "red", "#bebada"))
+
+plot (Venn (vn_otu), doWeights = FALSE)
+
+```
+
+
+## Investigate phylogenetic levels of taxonomic assingment of OTUs
+
+
+The following table shows, for each phylogenetic level,
+the number of OTU assignments where that level was the lowest assignment. 
+This table may also reveal issues where there is not lowest. 
+This could be some kind of error with the assignment, or a behavior of the
+assignment package. For example, ecotag keeps all data in the results. 
+The sequences that it cannot assign, it assigns to the "root" of the phylogenetic tree.
+
+
+```{r phylogeny}
+taxonomicRanksOfInterest <- c ("species", "genus", "family", "order", "class", "phylum", "kingdom")
+
+# Vsearch
+vsearch_taxonomy <- ovt_vsearch[,taxonomicRanksOfInterest]
+vsearch_best_match_scinames <- apply(vsearch_taxonomy, 1, function(x) head(x[x != ""], 1))
+
+vsearch_best_match_scinames <- unlist (lapply(X = vsearch_best_match_scinames, 
+                                      function (x) ifelse(length(x) == 0, "", x[1])))
+vsearch_best_match_levels <- apply(vsearch_taxonomy, 1, function(x) names(head(x[x != ""], 1)))
+vsearch_best_match_levels <- unlist (lapply(X = vsearch_best_match_levels, 
+                                      function (x) ifelse(length(x) == 0, "", x[1])))
+vsearch_best_match <- cbind.data.frame (ovt_vsearch$OTU_SEQID, 
+                                        vsearch_best_match_scinames, vsearch_best_match_levels)
+colnames (vsearch_best_match) <- c ("OTU_SEQID", "SCINAME", "LEVEL")
+
+
+# Ecotag
+ecotag_taxonomy <- ovt_ecotag[,taxonomicRanksOfInterest]
+ecotag_best_match_scinames <- apply(ecotag_taxonomy, 1, function(x) head(x[x != ""], 1))
+
+ecotag_best_match_scinames <- unlist (lapply(X = ecotag_best_match_scinames, 
+                                      function (x) ifelse(length(x) == 0, "", x[1])))
+ecotag_best_match_levels <- apply(ecotag_taxonomy, 1, function(x) names(head(x[x != ""], 1)))
+ecotag_best_match_levels <- unlist (lapply(X = ecotag_best_match_levels, 
+                                      function (x) ifelse(length(x) == 0, "", x[1])))
+ecotag_best_match <- cbind.data.frame (ovt_ecotag$OTU_SEQID, 
+                                        ecotag_best_match_scinames, ecotag_best_match_levels)
+colnames (ecotag_best_match) <- c ("OTU_SEQID", "SCINAME", "LEVEL")
+
+
+# Blast
+blast_taxonomy <- ovt_blast[,taxonomicRanksOfInterest]
+blast_best_match_scinames <- apply(blast_taxonomy, 1, function(x) head(x[x != ""], 1))
+
+blast_best_match_scinames <- unlist (lapply(X = blast_best_match_scinames, 
+                                      function (x) ifelse(length(x) == 0, "", x[1])))
+blast_best_match_levels <- apply(blast_taxonomy, 1, function(x) names(head(x[x != ""], 1)))
+blast_best_match_levels <- unlist (lapply(X = blast_best_match_levels, 
+                                      function (x) ifelse(length(x) == 0, "", x[1])))
+blast_best_match <- cbind.data.frame (ovt_blast$OTU_SEQID, 
+                                        blast_best_match_scinames, blast_best_match_levels)
+colnames (blast_best_match) <- c ("OTU_SEQID", "SCINAME", "LEVEL")
+
+
+
+
+taxon_level_counts_vsearch <- sapply (X = taxonomicRanksOfInterest, 
+                                      FUN = function (x) length (which(vsearch_best_match$LEVEL == x)))
+taxon_level_counts_ecotag <- sapply (X = taxonomicRanksOfInterest, 
+                                     FUN = function (x) length (which(ecotag_best_match$LEVEL == x)))
+taxon_level_counts_blast <- sapply (X = taxonomicRanksOfInterest, 
+                                     FUN = function (x) length (which(blast_best_match$LEVEL == x)))
+
+empty_taxon_count_vsearch <- length (which (vsearch_best_match$LEVEL == ""))
+empty_taxon_count_ecotag <- length (which (ecotag_best_match$LEVEL == ""))
+empty_taxon_count_blast <- length (which (blast_best_match$LEVEL == ""))
+empty_counts <- c (empty_taxon_count_vsearch, empty_taxon_count_ecotag, empty_taxon_count_blast)
+
+
+total_count_vsearch <- sum (taxon_level_counts_vsearch) + empty_taxon_count_vsearch
+total_count_ecotag <- sum (taxon_level_counts_ecotag) + empty_taxon_count_ecotag
+total_count_blast <- sum (taxon_level_counts_blast) + empty_taxon_count_blast
+total_counts <- c (total_count_vsearch, total_count_ecotag, total_count_blast)
+   
+
+# ASSERTION: total_counts should equal the nrow (ovt_XXX)
+    
+titles_col <- c ("Vsearch", "Ecotag", "Blast")
+counts_table <- rbind.data.frame (taxon_level_counts_vsearch, taxon_level_counts_ecotag, taxon_level_counts_blast)
+counts_table <- cbind.data.frame(titles_col, counts_table, empty_counts, total_counts)
+colnames (counts_table) <- c ("Source", taxonomicRanksOfInterest, "unassigned", "total")
+
+
+print (counts_table)
+```
+
+
+
+## Investigate identity scores
+
+BLAST, Vsearch and Ecotag each return an identity score.
+
+The Vsearch parameters specified a minimum identity score of 0.7.
+
+The Ecotag parameters specified a minumum identity score of 0.7.
+
+The BLAST parameters specified a minimum identity score of 0. (????)
+
+The following is intended to see if the assignment methods give similar identity scores when assigned to the same reference sequence,
+as well as the overall spread of identity scores. 
+
+```{r identity_scores}
+
+## Get each assigned OTU with identity score
+otu_identity_vsearch <- cbind.data.frame (ovt_vsearch$OTU_SEQID,
+                        ovt_vsearch$VSEARCH_IDENTITY_NT, ovt_vsearch$REF_SEQID)
+colnames (otu_identity_vsearch) <- c ("OTU_SEQID", "VSEARCH_IDENTITY_NT", "VSEARCH_REF_SEQID")
+
+
+otu_identity_ecotag <- cbind.data.frame (ovt_ecotag$OTU_SEQID, 
+                        ovt_ecotag$ECOTAG_IDENTITY_NT, ovt_ecotag$REF_SEQID)
+colnames (otu_identity_ecotag) <- c ("OTU_SEQID", "ECOTAG_IDENTITY_NT", "ECOTAG_REF_SEQID")
+
+
+otu_identity_blast <- cbind.data.frame (ovt_blast$OTU_SEQID,
+                        ovt_blast$BLAST_IDENTITY_NT, ovt_blast$REF_SEQID)
+colnames (otu_identity_blast) <- c ("OTU_SEQID", "BLAST_IDENTITY_NT", "BLAST_REF_SEQID")
+
+
+# Together such that each OTU has all identity scores
+otu_identity_EV <- merge (x = otu_identity_vsearch, y = otu_identity_ecotag, by = "OTU_SEQID")
+otu_identity_VB <- merge (x = otu_identity_vsearch, y = otu_identity_blast, by = "OTU_SEQID")
+otu_identity_EB <- merge (x = otu_identity_ecotag, y = otu_identity_blast, by = "OTU_SEQID")
+otu_identity_EVB <- merge (x = otu_identity_EV, y = otu_identity_blast,  by = "OTU_SEQID")
+
+```
+
+*Plot the identity scores for each method separately (intersection of OTUs).*
+
+```{r plot_identity_scores_separate}
+par(mfrow=c(1,3))
+plot (x = rownames(otu_identity_EVB), y = otu_identity_EVB$VSEARCH_IDENTITY_NT / 100, 
+      ylim = c(0.7,1), col = "#ffffb3", pch = '*',
+      ylab = "Vsearch Identity Score", xlab = "ith OTU")
+plot (x = rownames(otu_identity_EVB), y = otu_identity_EVB$ECOTAG_IDENTITY_NT, 
+      ylim = c(0.7, 1), col = "#8dd3c7", pch = '*',
+      ylab = "Ecotag Identity Score", xlab = "ith OTU")
+plot (x = rownames(otu_identity_EVB), y = otu_identity_EVB$BLAST_IDENTITY_NT / 100, 
+      ylim = c(0.7, 1), col = "#bebada", pch = '*',
+      ylab = "Blast Identity Score", xlab = "ith OTU")
+title("Identity scores for OTUs common to all results", outer=TRUE, line = -3)
+```
+
+*Plot the identity scores for each method together (intersection of OTUs).*
+
+```{r plot_identity_scores_together}
+plot (x = rownames(otu_identity_EVB), y = otu_identity_EVB$VSEARCH_IDENTITY_NT / 100, col = "#ffffb3", pch = '.')
+points (x = rownames(otu_identity_EVB), y = otu_identity_EVB$ECOTAG_IDENTITY_NT, col = "#8dd3c7", pch = '.')
+points (x = rownames(otu_identity_EVB), y = otu_identity_EVB$BLAST_IDENTITY_NT / 100, col = "#bebada", pch = '.')
+
+```
+
+*Compare the identity scores of the OTU intersections*
+
+```{r identity_scores_OTU_intersection}
+
+otu_identity_EV$VSEARCH_IDENTITY_NT <- otu_identity_EV$VSEARCH_IDENTITY_NT / 100
+otu_identity_VB$VSEARCH_IDENTITY_NT <- otu_identity_VB$VSEARCH_IDENTITY_NT / 100
+otu_identity_VB$BLAST_IDENTITY_NT <- otu_identity_VB$BLAST_IDENTITY_NT / 100
+otu_identity_EB$BLAST_IDENTITY_NT <- otu_identity_EB$BLAST_IDENTITY_NT / 100
+otu_identity_EVB$BLAST_IDENTITY_NT <- otu_identity_EVB$BLAST_IDENTITY_NT / 100
+otu_identity_EVB$SEARCH_IDENTITY_NT <- otu_identity_EVB$VSEARCH_IDENTITY_NT / 100
+
+
+num_same_OTU_EV <- nrow (otu_identity_EV)
+num_same_OTU_VB <- nrow (otu_identity_VB)
+num_same_OTU_EB <- nrow (otu_identity_EB)
+
+par(mfrow=c(1,3))
+
+identity_diffs_EV <- 
+  abs (otu_identity_EV$VSEARCH_IDENTITY_NT - otu_identity_EV$ECOTAG_IDENTITY_NT)
+plot (x = seq (1:nrow (otu_identity_EV)), y = identity_diffs_EV, col = "#ffffb3", pch = '*',
+      ylab = "Vsearch & Ecotag Identity Score Difference", xlab = "ith Reference Sequence")
+
+identity_diffs_VB <- 
+  abs (otu_identity_VB$VSEARCH_IDENTITY_NT - otu_identity_VB$BLAST_IDENTITY_NT )
+plot (x = seq (1:nrow (otu_identity_VB)), y = identity_diffs_VB, col = "#8dd3c7", pch = '*',
+      ylab = "Vsearch & Blast Identity Score Difference", xlab = "ith Reference Sequence")
+
+identity_diffs_EB <- 
+  abs (otu_identity_EB$ECOTAG_IDENTITY_NT - otu_identity_EB$BLAST_IDENTITY_NT)
+plot (x = seq (1:nrow (otu_identity_EB)), y = identity_diffs_EB, col = "#bebada", pch = '*',
+      ylab = "Ecotag & Blast Identity Score Difference", xlab = "ith Reference Sequence")
+
+title("Differences between identity scores", outer=TRUE, line = -3)
+
+
+
+par(mfrow=c(1,3))
+qqplot(x = otu_identity_EV$VSEARCH_IDENTITY_NT, y = otu_identity_EV$ECOTAG_IDENTITY_NT, plot.it = TRUE,
+       ylab = "Ecotag Identity", xlab = "Vsearch Identity", col = "mediumpurple4", pch = '#')
+abline(a=0, b = 1)
+
+qqplot(x = otu_identity_VB$VSEARCH_IDENTITY_NT, y = otu_identity_VB$BLAST_IDENTITY_NT, plot.it = TRUE,
+       ylab = "Blast Identity", xlab = "Vsearch Identity", col = "orange2", pch = '#')
+abline(a=.2, b=.8 )
+
+qqplot(x = otu_identity_EB$BLAST_IDENTITY_NT, y = otu_identity_EB$ECOTAG_IDENTITY_NT, plot.it = TRUE,
+       ylab = "Ecotag Identity", xlab = "Blast Identity", col = "olivedrab4", pch = '#') 
+abline(a=-.3 , b=1.3)
+
+
+title("QQ-Plot: Identity Scores between assignments from same OTU", outer=TRUE, line = -3)
+
+
+
+
+par(mfrow=c(1,3))
+plot(x = otu_identity_EV$VSEARCH_IDENTITY_NT, y = otu_identity_EV$ECOTAG_IDENTITY_NT,
+       ylab = "Ecotag Identity", xlab = "Vsearch Identity", col = "mediumpurple4", pch = '+')
+# Fit regression line
+abline (lm(VSEARCH_IDENTITY_NT ~ ECOTAG_IDENTITY_NT, data = otu_identity_EV), lwd = 3)
+
+plot(x = otu_identity_VB$VSEARCH_IDENTITY_NT, y = otu_identity_VB$BLAST_IDENTITY_NT,
+       ylab = "Blast Identity", xlab = "Vsearch Identity", col = "orange2", pch = '+')
+# Fit regression line
+abline (lm(VSEARCH_IDENTITY_NT ~ BLAST_IDENTITY_NT, data = otu_identity_VB), lwd = 3)
+
+plot(x = otu_identity_EB$BLAST_IDENTITY_NT, y = otu_identity_EB$ECOTAG_IDENTITY_NT,
+       ylab = "Ecotag Identity", xlab = "Blast Identity", col = "olivedrab4", pch = '+') 
+# Fit regression line
+abline (lm(ECOTAG_IDENTITY_NT ~ BLAST_IDENTITY_NT, data = otu_identity_EB), lwd = 3)
+
+title("Identity Scores between assignments from same OTU", outer=TRUE, line = -3)
+
+```
+
+*2-sample t-test between Ecotag Identity and Vsearch Identity for same OTUs*
+```{r}
+var.test(x = otu_identity_EV$VSEARCH_IDENTITY_NT, y = otu_identity_EV$ECOTAG_IDENTITY_NT)
+t.test(otu_identity_EV$VSEARCH_IDENTITY_NT, otu_identity_EV$ECOTAG_IDENTITY_NT, var.equal=FALSE, paired=TRUE, alternative = "two.sided")
+```
+*2-sample t-test between Blast Identity and Vsearch Identity for same OTUs*
+```{r}
+var.test(x = otu_identity_VB$VSEARCH_IDENTITY_NT, y = otu_identity_VB$BLAST_IDENTITY_NT)
+t.test(otu_identity_VB$VSEARCH_IDENTITY_NT, otu_identity_VB$BLAST_IDENTITY_NT, var.equal=FALSE, paired=TRUE, alternative = "two.sided")
+```
+*2-sample t-test between Ecotag Identity and Ecotag Identity for same OTUs*
+```{r}
+var.test(x = otu_identity_EB$BLAST_IDENTITY_NT, y = otu_identity_EB$ECOTAG_IDENTITY_NT)
+t.test(otu_identity_EB$BLAST_IDENTITY_NT, otu_identity_EB$ECOTAG_IDENTITY_NT, var.equal=FALSE, paired=TRUE, alternative = "two.sided")
+```
+
+
+
+
+
+-----
+
+In order to better compare, select OTUs that assigned to the same reference sequences with different methods. 
+
+```{r }
+otu_EV_same_refseq <- otu_identity_EV[as.character (otu_identity_EV$VSEARCH_REF_SEQID) == as.character (otu_identity_EV$ECOTAG_REF_SEQID),]
+otu_EV_same_refseq <- otu_EV_same_refseq[complete.cases(otu_EV_same_refseq),]
+num_same_ref_seq_EV <- nrow (otu_EV_same_refseq)
+
+otu_VB_same_refseq <- otu_identity_VB[ as.character (otu_identity_VB$VSEARCH_REF_SEQID) == as.character (otu_identity_VB$BLAST_REF_SEQID),]
+otu_VB_same_refseq <- otu_VB_same_refseq[complete.cases(otu_VB_same_refseq),]
+num_same_ref_seq_VB <- nrow (otu_VB_same_refseq)
+
+otu_EB_same_refseq <- otu_identity_EB[ as.character (otu_identity_EB$ECOTAG_REF_SEQID) == as.character (otu_identity_EB$BLAST_REF_SEQID),]
+otu_EB_same_refseq <- otu_EB_same_refseq[complete.cases(otu_EB_same_refseq),]
+num_same_ref_seq_EB <- nrow (otu_EB_same_refseq)
+
+```
+
+Vsearch and Ecotag share `r num_same_ref_seq_EV` assignments to the same reference sequence.
+
+Vsearch and Blast share `r num_same_ref_seq_VB` assignments to the same reference sequence.
+
+Ecotag and Blast share `r num_same_ref_seq_EB` assignments to the same reference sequence.
+
+```{r}
+par(mfrow=c(1,3))
+
+identity_diffs_EV <- 
+  abs (otu_EV_same_refseq$VSEARCH_IDENTITY_NT- otu_EV_same_refseq$ECOTAG_IDENTITY_NT)
+plot (x = seq (1:nrow (otu_EV_same_refseq)), y = identity_diffs_EV, col = "#ffffb3", pch = '*',
+      ylab = "Vsearch & Ecotag Identity Score Difference", xlab = "ith Reference Sequence")
+
+identity_diffs_VB <- 
+  abs (otu_VB_same_refseq$VSEARCH_IDENTITY_NT - otu_VB_same_refseq$BLAST_IDENTITY_NT)
+plot (x = seq (1:nrow (otu_VB_same_refseq)), y = identity_diffs_VB, col = "#8dd3c7", pch = '*',
+      ylab = "Vsearch & Blast Identity Score Difference", xlab = "ith Reference Sequence")
+
+identity_diffs_EB <- 
+  abs (otu_EB_same_refseq$BLAST_IDENTITY_NT - otu_EB_same_refseq$ECOTAG_IDENTITY_NT)
+plot (x = seq (1:nrow (otu_EB_same_refseq)), y = identity_diffs_EB, col = "#bebada", pch = '*',
+      ylab = "Ecotag & Blast Identity Score Difference", xlab = "ith Reference Sequence")
+
+
+title("Differences between identity scores", outer=TRUE, line = -3)
+
+par(mfrow=c(1,3))
+qqplot(x = otu_EV_same_refseq$VSEARCH_IDENTITY_NT, y = otu_EV_same_refseq$ECOTAG_IDENTITY_NT, plot.it = TRUE,
+       ylab = "Ecotag Identity", xlab = "Vsearch Identity", col = "mediumpurple4", pch = '#')
+
+qqplot(x = otu_VB_same_refseq$VSEARCH_IDENTITY_NT, y = otu_VB_same_refseq$BLAST_IDENTITY_NT, plot.it = TRUE,
+       ylab = "Blast Identity", xlab = "Vsearch Identity", col = "orange2", pch = '#')
+
+qqplot(x = otu_EB_same_refseq$BLAST_IDENTITY_NT, y = otu_EB_same_refseq$ECOTAG_IDENTITY_NT, plot.it = TRUE,
+       ylab = "Ecotag Identity", xlab = "Blast Identity", col = "olivedrab4", pch = '#') 
+
+```
+
+*2-sample t-test between Ecotag Identity and Vsearch Identity for matched reference sequence*
+```{r}
+var.test(x = otu_EV_same_refseq$VSEARCH_IDENTITY_NT, y = otu_EV_same_refseq$ECOTAG_IDENTITY_NT)
+t.test(otu_EV_same_refseq$VSEARCH_IDENTITY_NT, otu_EV_same_refseq$ECOTAG_IDENTITY_NT, var.equal=TRUE, paired=TRUE, alternative = "two.sided")
+```
+*2-sample t-test between Blast Identity and Vsearch Identity for matched reference sequence*
+```{r}
+var.test(x = otu_VB_same_refseq$VSEARCH_IDENTITY_NT, y = otu_VB_same_refseq$BLAST_IDENTITY_NT)
+t.test(otu_VB_same_refseq$VSEARCH_IDENTITY_NT, otu_VB_same_refseq$BLAST_IDENTITY_NT , var.equal=FALSE, paired=TRUE, alternative = "two.sided")
+```
+*2-sample t-test between Ecotag Identity and Ecotag Identity for matched reference sequence*
+```{r}
+var.test(x = otu_EB_same_refseq$BLAST_IDENTITY_NT, y = otu_EB_same_refseq$ECOTAG_IDENTITY_NT)
+t.test(otu_EB_same_refseq$BLAST_IDENTITY_NT , otu_EB_same_refseq$ECOTAG_IDENTITY_NT, var.equal=FALSE, paired=TRUE, alternative = "two.sided")
+```
+
+# Part 2: Filtered Results
+
+## Filter singletons, etc
+
+In order to reduce amount of junk assignments, remove based on the following criteria:
+
+1. Singleton (type 1): The read count across all samples is 1
+2. Singleton (type 2): The read count in any single sample is never > 1
+3. Singleton (type 3): The read count in any single sample is never greater than 1% of total count across all samples
+
+``` {r filter 1}
+
+## Filter singleton (type 1)
+
+singleton_1_vsearch_length <- nrow (ovt_vsearch[ovt_vsearch$TOTAL == 1,])
+ovt_vsearch <- ovt_vsearch[ovt_vsearch$TOTAL > 1,]
+
+singleton_1_ecotag_length <- nrow (ovt_ecotag[ovt_ecotag$TOTAL == 1,])
+ovt_ecotag <- ovt_ecotag[ovt_ecotag$TOTAL > 1,]
+
+singleton_1_blast_length <- nrow (ovt_blast[ovt_blast$TOTAL == 1,])
+ovt_blast <- ovt_blast[ovt_blast$TOTAL > 1,]
+
+
+## Filter singleton (type 2)
+
+singleton_2_vsearch_length <- nrow (ovt_vsearch[apply(ovt_vsearch[,sample_vsearch_idx], 1, function(row) {all(row <= 1)}),])
+ovt_vsearch <- ovt_vsearch[apply(ovt_vsearch[,sample_vsearch_idx], 1, function(row) {any(row > 1)}),]
+
+singleton_2_ecotag_length <- nrow (ovt_ecotag[apply(ovt_ecotag[,sample_ecotag_idx], 1, function(row) {all(row <= 1)}),])
+ovt_ecotag <- ovt_ecotag[apply(ovt_ecotag[,sample_ecotag_idx], 1, function(row) {any(row > 1)}),]
+
+singleton_2_blast_length <- nrow (ovt_blast[apply(ovt_blast[,sample_blast_idx], 1, function(row) {all(row <= 1)}),])
+ovt_blast <- ovt_blast[apply(ovt_blast[,sample_blast_idx], 1, function(row) {any(row > 1)}),]
+
+## Filter singleton (type 3)
+
+singleton_3_vsearch_length <- nrow (ovt_vsearch [apply(ovt_vsearch[,sample_vsearch_idx], 1, function(row) {  all( .01 >= (row/sum(row) ) ) }), ])
+ovt_vsearch <- ovt_vsearch [apply(ovt_vsearch[,sample_vsearch_idx], 1, function(row) {  any( .01 < (row/sum(row) ) ) }), ]
+
+singleton_3_ecotag_length <- nrow (ovt_ecotag [apply(ovt_ecotag[,sample_ecotag_idx], 1, function(row) {  all( .01 >= (row/sum(row) ) ) }), ])
+ovt_ecotag <- ovt_ecotag [apply(ovt_ecotag[,sample_ecotag_idx], 1, function(row) {  any( .01 < (row/sum(row) ) ) }), ]
+
+singleton_3_blast_length <- nrow (ovt_blast [apply(ovt_blast[,sample_blast_idx], 1, function(row) {  all( .01 >= (row/sum(row) ) ) }), ])
+ovt_blast <- ovt_blast [apply(ovt_blast[,sample_blast_idx], 1, function(row) {  any( .01 < (row/sum(row) ) ) }), ]
+
+# Total the filtered OTUs
+total_filtered_vsearch <- singleton_1_vsearch_length + singleton_2_vsearch_length + singleton_3_vsearch_length
+total_filtered_ecotag <- singleton_1_ecotag_length + singleton_2_ecotag_length + singleton_3_ecotag_length
+total_filtered_blast <- singleton_1_blast_length + singleton_2_blast_length + singleton_3_blast_length
+
+```
+
+Need to print this info
+
+| | Vsearch | Ecotag  | Blast
+| - |:-:| :-:| -:
+| Singletons (type 1) | `r singleton_1_vsearch_length` | `r singleton_1_ecotag_length` | `r singleton_1_blast_length`
+| Singletons (type 2) | `r singleton_2_vsearch_length` | `r singleton_2_ecotag_length` | `r singleton_2_blast_length`
+| Singletons (type 3) | `r singleton_3_vsearch_length` | `r singleton_3_ecotag_length` | `r singleton_3_blast_length`
+| Total Filtered OTUs| `r total_filtered_vsearch` | `r total_filtered_ecotag` | `r total_filtered_blast` 
+| Remaining OTUs     | `r nrow (ovt_vsearch)` | `r nrow (ovt_ecotag)` | `r nrow (ovt_blast)`
+
+
+
+## Overview
+
+```{r compare_filtered}
+total_OTUs <- length (OTUs)
+
+uniq_vsearch_tseqs <- unique(ovt_vsearch$REF_SEQID)
+uniq_ecotag_tseqs <- unique(ovt_ecotag$REF_SEQID)
+uniq_blast_tseqs <- unique(ovt_blast$REF_SEQID)
+
+uniq_vsearch_tseqs_len <- length (uniq_vsearch_tseqs)
+uniq_ecotag_tseqs_len <- length (uniq_ecotag_tseqs)
+uniq_blast_tseqs_len <- length (uniq_blast_tseqs)
+
+intersect_len_EV <- length (intersect (uniq_vsearch_tseqs, uniq_ecotag_tseqs))
+interset_len_EB <- length (intersect (uniq_blast_tseqs, uniq_ecotag_tseqs))
+intersect_len_VB <- length (intersect (uniq_vsearch_tseqs, uniq_blast_tseqs))
+inter <- intersect (uniq_vsearch_tseqs, uniq_ecotag_tseqs)
+intersect_len <- length (intersect (inter, uniq_blast_tseqs))
+
+vn <- list (0)
+vn[[1]] <- uniq_vsearch_tseqs
+vn[[2]] <- uniq_ecotag_tseqs
+vn[[3]] <- uniq_blast_tseqs
+names (vn) <- c ("Vsearch", "Ecotag", "Blast")
+```
+
+The following table compares the number of OTUs present in the data
+produced for each method of taxonomic assignment. This does not take into
+account possible erroneous/problematic assignments as these will be discovered
+and addressed as part of this evaluation process. 
+
+In addition, the table shows the number of unique reference assignments for each
+assignment method, as well as the intersection of all three: 
+the number of OTUs that were assigned to the same reference sequence. 
+
+| | Vsearch | Ecotag  | Blast
+| - |:-:| :-:| -:
+| Number of Assigned OTUs | `r nrow (ovt_vsearch)` | `r nrow (ovt_ecotag)` | `r nrow (ovt_blast)`
+| Total OTUs | `r total_OTUs` | `r total_OTUs` | `r total_OTUs`
+| Percent Assigned OTUs | `r (nrow (ovt_vsearch)/total_OTUs)*100` | `r (nrow (ovt_ecotag)/total_OTUs)*100` | `r (nrow (ovt_blast)/total_OTUs)*100`
+| Unique Reference Sequences      | `r uniq_vsearch_tseqs_len` | `r uniq_ecotag_tseqs_len` | `r uniq_blast_tseqs_len`
+| Intersection of Unique Reference Sequences        | `r intersect_len`      |   `r intersect_len` | `r intersect_len` 
+| Percent References Sequences Shared | `r (intersect_len/uniq_vsearch_tseqs_len)*100`      |    `r (intersect_len/uniq_ecotag_tseqs_len)*100` | `r (intersect_len/uniq_blast_tseqs_len)*100`
+
+```{r venn_filtered}
+grid.newpage()
+#draw.triple.venn(area1 = uniq_vsearch_tseqs_len, area2 = uniq_ecotag_tseqs_len, area3 = uniq_blast_tseqs_len, 
+#    n12 = intersect_len_EV, n23 = interset_len_EB, n13 = intersect_len_VB, 
+#    n123 = intersect_len, category = c("Vsearch", "Ecotag", "Blast"), lty = "blank", 
+#    fill = c("#ffffb3", "red", "#bebada"))
+
+plot (Venn (vn))
+```
+
+
+```{r venn_assigned_OTUs_filtered}
+
+print ("Intersection of Assigned OTUs")
+
+intersect_len_EV <- length (intersect (ovt_ecotag$OTU_SEQID, ovt_vsearch$OTU_SEQID))
+interset_len_EB <- length (intersect (ovt_ecotag$OTU_SEQID, ovt_blast$OTU_SEQID))
+intersect_len_VB <- length (intersect (ovt_blast$OTU_SEQID, ovt_vsearch$OTU_SEQID))
+inter <- intersect (ovt_ecotag$OTU_SEQID, ovt_vsearch$OTU_SEQID)
+intersect_len <- length (intersect (inter, ovt_blast$OTU_SEQID))
+
+#grid.newpage()
+#draw.triple.venn(area1 = nrow (ovt_vsearch), area2 = nrow (ovt_ecotag), area3 = nrow (ovt_blast), 
+#    n12 = intersect_len_EV, n23 = interset_len_EB, n13 = intersect_len_VB, 
+#    n123 = intersect_len, category = c("Vsearch", "Ecotag", "Blast"), lty = "blank", 
+#    fill = c("#ffffb3", "red", "#bebada"))
+
+vn_otu <- list (0)
+vn_otu[[1]] <- ovt_vsearch$OTU_SEQID
+vn_otu[[2]] <- ovt_ecotag$OTU_SEQID
+vn_otu[[3]] <- ovt_blast$OTU_SEQID
+names (vn_otu) <- c ("Vsearch", "Ecotag", "Blast")
+
+plot (Venn (vn_otu), doWeights = FALSE)
+
+```
+
+## Investigate phylogenetic levels of taxonomic assingment of OTUs
+
+The following table shows, for each phylogenetic level,
+the number of OTU assignments where that level was the lowest assignment. 
+This table may also reveal issues where there is not lowest. 
+This could be some kind of error with the assignment, or a behavior of the
+assignment package. For example, ecotag keeps all data in the results. 
+The sequences that it cannot assign, it assigns to the "root" of the phylogenetic tree.
+
+
+```{r phylogeny_filtered}
+taxonomicRanksOfInterest <- c ("species", "genus", "family", "order", "class", "phylum", "kingdom")
+
+# Vsearch
+vsearch_taxonomy <- ovt_vsearch[,taxonomicRanksOfInterest]
+vsearch_best_match_scinames <- apply(vsearch_taxonomy, 1, function(x) head(x[x != ""], 1))
+
+vsearch_best_match_scinames <- unlist (lapply(X = vsearch_best_match_scinames, 
+                                      function (x) ifelse(length(x) == 0, "", x[1])))
+vsearch_best_match_levels <- apply(vsearch_taxonomy, 1, function(x) names(head(x[x != ""], 1)))
+vsearch_best_match_levels <- unlist (lapply(X = vsearch_best_match_levels, 
+                                      function (x) ifelse(length(x) == 0, "", x[1])))
+vsearch_best_match <- cbind.data.frame (ovt_vsearch$OTU_SEQID, 
+                                        vsearch_best_match_scinames, vsearch_best_match_levels)
+colnames (vsearch_best_match) <- c ("OTU_SEQID", "SCINAME", "LEVEL")
+
+
+# Ecotag
+ecotag_taxonomy <- ovt_ecotag[,taxonomicRanksOfInterest]
+ecotag_best_match_scinames <- apply(ecotag_taxonomy, 1, function(x) head(x[x != ""], 1))
+
+ecotag_best_match_scinames <- unlist (lapply(X = ecotag_best_match_scinames, 
+                                      function (x) ifelse(length(x) == 0, "", x[1])))
+ecotag_best_match_levels <- apply(ecotag_taxonomy, 1, function(x) names(head(x[x != ""], 1)))
+ecotag_best_match_levels <- unlist (lapply(X = ecotag_best_match_levels, 
+                                      function (x) ifelse(length(x) == 0, "", x[1])))
+ecotag_best_match <- cbind.data.frame (ovt_ecotag$OTU_SEQID, 
+                                        ecotag_best_match_scinames, ecotag_best_match_levels)
+colnames (ecotag_best_match) <- c ("OTU_SEQID", "SCINAME", "LEVEL")
+
+
+# Blast
+blast_taxonomy <- ovt_blast[,taxonomicRanksOfInterest]
+blast_best_match_scinames <- apply(blast_taxonomy, 1, function(x) head(x[x != ""], 1))
+
+blast_best_match_scinames <- unlist (lapply(X = blast_best_match_scinames, 
+                                      function (x) ifelse(length(x) == 0, "", x[1])))
+blast_best_match_levels <- apply(blast_taxonomy, 1, function(x) names(head(x[x != ""], 1)))
+blast_best_match_levels <- unlist (lapply(X = blast_best_match_levels, 
+                                      function (x) ifelse(length(x) == 0, "", x[1])))
+blast_best_match <- cbind.data.frame (ovt_blast$OTU_SEQID, 
+                                        blast_best_match_scinames, blast_best_match_levels)
+colnames (blast_best_match) <- c ("OTU_SEQID", "SCINAME", "LEVEL")
+
+
+
+
+taxon_level_counts_vsearch <- sapply (X = taxonomicRanksOfInterest, 
+                                      FUN = function (x) length (which(vsearch_best_match$LEVEL == x)))
+taxon_level_counts_ecotag <- sapply (X = taxonomicRanksOfInterest, 
+                                     FUN = function (x) length (which(ecotag_best_match$LEVEL == x)))
+taxon_level_counts_blast <- sapply (X = taxonomicRanksOfInterest, 
+                                     FUN = function (x) length (which(blast_best_match$LEVEL == x)))
+
+empty_taxon_count_vsearch <- length (which (vsearch_best_match$LEVEL == ""))
+empty_taxon_count_ecotag <- length (which (ecotag_best_match$LEVEL == ""))
+empty_taxon_count_blast <- length (which (blast_best_match$LEVEL == ""))
+empty_counts <- c (empty_taxon_count_vsearch, empty_taxon_count_ecotag, empty_taxon_count_blast)
+
+
+total_count_vsearch <- sum (taxon_level_counts_vsearch) + empty_taxon_count_vsearch
+total_count_ecotag <- sum (taxon_level_counts_ecotag) + empty_taxon_count_ecotag
+total_count_blast <- sum (taxon_level_counts_blast) + empty_taxon_count_blast
+total_counts <- c (total_count_vsearch, total_count_ecotag, total_count_blast)
+   
+
+# ASSERTION: total_counts should equal the nrow (ovt_XXX)
+    
+titles_col <- c ("Vsearch", "Ecotag", "Blast")
+counts_table <- rbind.data.frame (taxon_level_counts_vsearch, taxon_level_counts_ecotag, taxon_level_counts_blast)
+counts_table <- cbind.data.frame(titles_col, counts_table, empty_counts, total_counts)
+colnames (counts_table) <- c ("Source", taxonomicRanksOfInterest, "unassigned", "total")
+
+
+print (counts_table)
+
+# bar plot of proportion assigned at species level
+df <- cbind.data.frame (counts_table$Source, counts_table$species / total_OTUs)
+colnames (df) <- c ("source", "proportions")
+ggplot (data=df, aes(y=proportions, x=source, fill=source)) + geom_bar(stat="identity", color = "black" ) + scale_fill_manual(values=c("#bebada", "#8dd3c7", "#ffffb3"))
+
+# bar plot rank assignments for Ecotag  
+proportions <- unlist (counts_table[2,][2:8][1,] / sum (counts_table[2,][2:8][1,] ))
+df <- cbind.data.frame (proportions, taxonomicRanksOfInterest)
+df <- data.frame(taxon_rank = taxonomicRanksOfInterest, proportions)
+ggplot (data=df, aes(y=proportions, x=taxon_rank)) + geom_bar(stat="identity", fill = "#8dd3c7", color = "black") + scale_x_discrete (limits = taxonomicRanksOfInterest) + scale_y_continuous(labels = scales::percent)
+
+```
+
+## Investigate Taxonomy (Before 97% filter)
+
+
+```{r taxonomy}
+
+# Count number of unique ranks per phylogenetic level
+
+uniqRanks <- cbind ( c ("Vsearch", "Ecotag", "Blast"), rbind (
+apply(vsearch_taxonomy, MARGIN = 2, FUN = function (x) length (unique(x))),
+apply(ecotag_taxonomy, MARGIN = 2, FUN = function (x) length (unique(x))),
+apply(blast_taxonomy, MARGIN = 2, FUN = function (x) length (unique(x))) ) )
+colnames (uniqRanks)[1] <- "Source"
+print (uniqRanks)
+
+intersect_taxonomy <- function (A, B){
+  intersect_lens <- c ()
+  for (i in taxonomicRanksOfInterest){
+    intersect_lens <- c (intersect_lens, ( length ( intersect ( unlist (unique (A[i])), unlist (unique (B[i])) ) )) )
+  }
+  intersect_lens
+}
+
+intersect_taxonomy_three <- function (A, B, C){
+  intersect_lens <- c ()
+  for (i in taxonomicRanksOfInterest){
+    inter_AB <- intersect (unlist (unique (A[i])), unlist (unique (B[i])) )
+    intersect_lens <- c (intersect_lens, ( length ( intersect ( inter_AB, unlist (unique (C[i])) ) )) )
+  }
+  intersect_lens
+}
+
+intersect_counts_EV <- intersect_taxonomy(A = vsearch_taxonomy, B = ecotag_taxonomy)
+intersect_counts_EB <- intersect_taxonomy(A = ecotag_taxonomy, B = blast_taxonomy)
+intersect_counts_BV <- intersect_taxonomy(A = vsearch_taxonomy, B = blast_taxonomy)
+intersect_counts_EBV <- intersect_taxonomy_three(A = vsearch_taxonomy, B = ecotag_taxonomy, C = blast_taxonomy)
+intersect_counts_table <- cbind.data.frame (intersect_counts_EV, intersect_counts_EB, intersect_counts_BV, intersect_counts_EBV)
+colnames (intersect_counts_table) <- c ("Vsearch, Ecotag", "Ecotag, Blast", "Vsearch, Blast", "Vsearch, Ecotag, Blast")
+
+print (intersect_counts_table)
+
+
+uniqRanks <- cbind ( c ("Vsearch", "Ecotag", "Blast"), rbind (
+apply(vsearch_taxonomy, MARGIN = 2, FUN = function (x) length (unique(x))),
+apply(ecotag_taxonomy, MARGIN = 2, FUN = function (x) length (unique(x))),
+apply(blast_taxonomy, MARGIN = 2, FUN = function (x) length (unique(x))) ) )
+colnames (uniqRanks)[1] <- "Source"
+
+print (uniqRanks)
+
+# Get counts of specific unique ranks within a level
+vsearch_taxonomy_uniq <- apply(vsearch_taxonomy, MARGIN = 2, FUN = function (x) unique(x))
+ecotag_taxonomy_uniq <- apply(ecotag_taxonomy, MARGIN = 2, FUN = function (x) unique(x))
+blast_taxonomy_uniq <- apply(blast_taxonomy, MARGIN = 2, FUN = function (x) unique(x))
+
+# Vsearch class counts
+vsearch_class_counts <- sapply (vsearch_taxonomy_uniq$class, FUN = function (x) length (which(vsearch_taxonomy$class == x)))
+vsearch_phylum_counts <- sapply (vsearch_taxonomy_uniq$phylum, FUN = function (x) length (which(vsearch_taxonomy$phylum == x)))
+vsearch_kingdom_counts <- sapply (vsearch_taxonomy_uniq$kingdom, FUN = function (x) length (which(vsearch_taxonomy$kingdom == x)))
+
+# Ecotag class counts
+ecotag_class_counts <- sapply (ecotag_taxonomy_uniq$class, FUN = function (x) length (which(ecotag_taxonomy$class == x)))
+ecotag_phylum_counts <- sapply (ecotag_taxonomy_uniq$phylum, FUN = function (x) length (which(ecotag_taxonomy$phylum == x)))
+ecotag_kingdom_counts <- sapply (ecotag_taxonomy_uniq$kingdom, FUN = function (x) length (which(ecotag_taxonomy$kingdom == x)))
+
+# Blast class counts
+blast_class_counts <- sapply (blast_taxonomy_uniq$class, FUN = function (x) length (which(blast_taxonomy$class == x)))
+blast_phylum_counts <- sapply (blast_taxonomy_uniq$phylum, FUN = function (x) length (which(blast_taxonomy$phylum == x)))
+blast_kingdom_counts <- sapply (blast_taxonomy_uniq$kingdom, FUN = function (x) length (which(blast_taxonomy$kingdom == x)))
+
+print (vsearch_class_counts)
+print (ecotag_class_counts)
+print (blast_class_counts)
+
+print (vsearch_phylum_counts)
+print (ecotag_phylum_counts)
+print (blast_phylum_counts)
+
+print (vsearch_kingdom_counts)
+print (ecotag_kingdom_counts)
+print (blast_kingdom_counts)
+```
+
+
+
+
+### Part 3: 97% identity filter
+
+```{r taxon_filtered2 }
+
+taxonomicRanksOfInterest <- c ("species", "genus", "family", "order", "class", "phylum", "kingdom")
+
+# Vsearch
+ovt_vsearch_97 <- ovt_vsearch[ovt_vsearch$VSEARCH_IDENTITY_NT >= 97,]
+
+vsearch_taxonomy <- ovt_vsearch_97[,taxonomicRanksOfInterest]
+vsearch_best_match_scinames <- apply(vsearch_taxonomy, 1, function(x) head(x[x != ""], 1))
+
+vsearch_best_match_scinames <- unlist (lapply(X = vsearch_best_match_scinames, 
+                                      function (x) ifelse(length(x) == 0, "", x[1])))
+vsearch_best_match_levels <- apply(vsearch_taxonomy, 1, function(x) names(head(x[x != ""], 1)))
+vsearch_best_match_levels <- unlist (lapply(X = vsearch_best_match_levels, 
+                                      function (x) ifelse(length(x) == 0, "", x[1])))
+vsearch_best_match <- cbind.data.frame (ovt_vsearch_97$OTU_SEQID, 
+                                        vsearch_best_match_scinames, vsearch_best_match_levels)
+colnames (vsearch_best_match) <- c ("OTU_SEQID", "SCINAME", "LEVEL")
+
+
+# Ecotag
+ovt_ecotag_97 <- ovt_ecotag[ovt_ecotag$ECOTAG_IDENTITY_NT >= .97,]
+
+ecotag_taxonomy <- ovt_ecotag_97[,taxonomicRanksOfInterest]
+ecotag_best_match_scinames <- apply(ecotag_taxonomy, 1, function(x) head(x[x != ""], 1))
+
+ecotag_best_match_scinames <- unlist (lapply(X = ecotag_best_match_scinames, 
+                                      function (x) ifelse(length(x) == 0, "", x[1])))
+ecotag_best_match_levels <- apply(ecotag_taxonomy, 1, function(x) names(head(x[x != ""], 1)))
+ecotag_best_match_levels <- unlist (lapply(X = ecotag_best_match_levels, 
+                                      function (x) ifelse(length(x) == 0, "", x[1])))
+ecotag_best_match <- cbind.data.frame (ovt_ecotag_97$OTU_SEQID, 
+                                        ecotag_best_match_scinames, ecotag_best_match_levels)
+colnames (ecotag_best_match) <- c ("OTU_SEQID", "SCINAME", "LEVEL")
+
+
+# Blast
+ovt_blast_97 <- ovt_blast[ovt_blast$BLAST_IDENTITY_NT >= 97,]
+
+blast_taxonomy <- ovt_blast_97[,taxonomicRanksOfInterest]
+blast_best_match_scinames <- apply(blast_taxonomy, 1, function(x) head(x[x != ""], 1))
+
+blast_best_match_scinames <- unlist (lapply(X = blast_best_match_scinames, 
+                                      function (x) ifelse(length(x) == 0, "", x[1])))
+blast_best_match_levels <- apply(blast_taxonomy, 1, function(x) names(head(x[x != ""], 1)))
+blast_best_match_levels <- unlist (lapply(X = blast_best_match_levels, 
+                                      function (x) ifelse(length(x) == 0, "", x[1])))
+blast_best_match <- cbind.data.frame (ovt_blast_97$OTU_SEQID, 
+                                        blast_best_match_scinames, blast_best_match_levels)
+colnames (blast_best_match) <- c ("OTU_SEQID", "SCINAME", "LEVEL")
+
+
+
+
+taxon_level_counts_vsearch <- sapply (X = taxonomicRanksOfInterest, 
+                                      FUN = function (x) length (which(vsearch_best_match$LEVEL == x)))
+taxon_level_counts_ecotag <- sapply (X = taxonomicRanksOfInterest, 
+                                     FUN = function (x) length (which(ecotag_best_match$LEVEL == x)))
+taxon_level_counts_blast <- sapply (X = taxonomicRanksOfInterest, 
+                                     FUN = function (x) length (which(blast_best_match$LEVEL == x)))
+
+empty_taxon_count_vsearch <- length (which (vsearch_best_match$LEVEL == ""))
+empty_taxon_count_ecotag <- length (which (ecotag_best_match$LEVEL == ""))
+empty_taxon_count_blast <- length (which (blast_best_match$LEVEL == ""))
+empty_counts <- c (empty_taxon_count_vsearch, empty_taxon_count_ecotag, empty_taxon_count_blast)
+
+
+total_count_vsearch <- sum (taxon_level_counts_vsearch) + empty_taxon_count_vsearch
+total_count_ecotag <- sum (taxon_level_counts_ecotag) + empty_taxon_count_ecotag
+total_count_blast <- sum (taxon_level_counts_blast) + empty_taxon_count_blast
+total_counts <- c (total_count_vsearch, total_count_ecotag, total_count_blast)
+   
+
+# ASSERTION: total_counts should equal the nrow (ovt_XXX_97)
+    
+titles_col <- c ("Vsearch", "Ecotag", "Blast")
+counts_table <- rbind.data.frame (taxon_level_counts_vsearch, taxon_level_counts_ecotag, taxon_level_counts_blast)
+counts_table <- cbind.data.frame(titles_col, counts_table, empty_counts, total_counts)
+colnames (counts_table) <- c ("Source", taxonomicRanksOfInterest, "unassigned", "total")
+
+
+print (counts_table)
+
+# bar plot of proportion assigned at species level
+df <- cbind.data.frame (counts_table$Source, counts_table$species / total_OTUs)
+colnames (df) <- c ("source", "proportions")
+ggplot (data=df, aes(y=proportions, x=source, fill=source)) + geom_bar(stat="identity", color = "black" ) + scale_fill_manual(values=c("#bebada", "#8dd3c7", "#ffffb3"))
+
+# bar plot rank assignments for Ecotag  
+proportions <- unlist (counts_table[2,][2:8][1,] / sum (counts_table[2,][2:8][1,] ))
+df <- cbind.data.frame (proportions, taxonomicRanksOfInterest)
+df <- data.frame(taxon_rank = taxonomicRanksOfInterest, proportions)
+ggplot (data=df, aes(y=proportions, x=taxon_rank)) + geom_bar(stat="identity", fill = "#8dd3c7", color = "black") + scale_x_discrete (limits = taxonomicRanksOfInterest) + scale_y_continuous(labels = scales::percent)
+
+```
+
+
+```{r taxon_97}
+
+uniqRanks <- cbind ( c ("Vsearch", "Ecotag", "Blast"), rbind (
+apply(vsearch_taxonomy, MARGIN = 2, FUN = function (x) length (unique(x))),
+apply(ecotag_taxonomy, MARGIN = 2, FUN = function (x) length (unique(x))),
+apply(blast_taxonomy, MARGIN = 2, FUN = function (x) length (unique(x))) ) )
+colnames (uniqRanks)[1] <- "Source"
+print (uniqRanks)
+
+intersect_taxonomy <- function (A, B){
+  intersect_lens <- c ()
+  for (i in taxonomicRanksOfInterest){
+    intersect_lens <- c (intersect_lens, ( length ( intersect ( unlist (unique (A[i])), unlist (unique (B[i])) ) )) )
+  }
+  intersect_lens
+}
+
+intersect_taxonomy_three <- function (A, B, C){
+  intersect_lens <- c ()
+  for (i in taxonomicRanksOfInterest){
+    inter_AB <- intersect (unlist (unique (A[i])), unlist (unique (B[i])) )
+    intersect_lens <- c (intersect_lens, ( length ( intersect ( inter_AB, unlist (unique (C[i])) ) )) )
+  }
+  intersect_lens
+}
+
+intersect_counts_EV <- intersect_taxonomy(A = vsearch_taxonomy, B = ecotag_taxonomy)
+intersect_counts_EB <- intersect_taxonomy(A = ecotag_taxonomy, B = blast_taxonomy)
+intersect_counts_BV <- intersect_taxonomy(A = vsearch_taxonomy, B = blast_taxonomy)
+intersect_counts_EBV <- intersect_taxonomy_three(A = vsearch_taxonomy, B = ecotag_taxonomy, C = blast_taxonomy)
+intersect_counts_table <- cbind.data.frame (intersect_counts_EV, intersect_counts_EB, intersect_counts_BV, intersect_counts_EBV)
+colnames (intersect_counts_table) <- c ("Vsearch, Ecotag", "Ecotag, Blast", "Vsearch, Blast", "Vsearch, Ecotag, Blast")
+
+print (intersect_counts_table)
+
+
+uniqRanks <- cbind ( c ("Vsearch", "Ecotag", "Blast"), rbind (
+apply(vsearch_taxonomy, MARGIN = 2, FUN = function (x) length (unique(x))),
+apply(ecotag_taxonomy, MARGIN = 2, FUN = function (x) length (unique(x))),
+apply(blast_taxonomy, MARGIN = 2, FUN = function (x) length (unique(x))) ) )
+colnames (uniqRanks)[1] <- "Source"
+
+print (uniqRanks)
+
+# Get counts of specific unique ranks within a level
+vsearch_taxonomy_uniq <- apply(vsearch_taxonomy, MARGIN = 2, FUN = function (x) unique(x))
+ecotag_taxonomy_uniq <- apply(ecotag_taxonomy, MARGIN = 2, FUN = function (x) unique(x))
+blast_taxonomy_uniq <- apply(blast_taxonomy, MARGIN = 2, FUN = function (x) unique(x))
+
+# Vsearch class counts
+vsearch_class_counts <- sapply (vsearch_taxonomy_uniq$class, FUN = function (x) length (which(vsearch_taxonomy$class == x)))
+vsearch_phylum_counts <- sapply (vsearch_taxonomy_uniq$phylum, FUN = function (x) length (which(vsearch_taxonomy$phylum == x)))
+vsearch_kingdom_counts <- sapply (vsearch_taxonomy_uniq$kingdom, FUN = function (x) length (which(vsearch_taxonomy$kingdom == x)))
+
+# Ecotag class counts
+ecotag_class_counts <- sapply (ecotag_taxonomy_uniq$class, FUN = function (x) length (which(ecotag_taxonomy$class == x)))
+ecotag_phylum_counts <- sapply (ecotag_taxonomy_uniq$phylum, FUN = function (x) length (which(ecotag_taxonomy$phylum == x)))
+ecotag_kingdom_counts <- sapply (ecotag_taxonomy_uniq$kingdom, FUN = function (x) length (which(ecotag_taxonomy$kingdom == x)))
+
+# Blast class counts
+blast_class_counts <- sapply (blast_taxonomy_uniq$class, FUN = function (x) length (which(blast_taxonomy$class == x)))
+blast_phylum_counts <- sapply (blast_taxonomy_uniq$phylum, FUN = function (x) length (which(blast_taxonomy$phylum == x)))
+blast_kingdom_counts <- sapply (blast_taxonomy_uniq$kingdom, FUN = function (x) length (which(blast_taxonomy$kingdom == x)))
+
+print (vsearch_class_counts)
+print (ecotag_class_counts)
+print (blast_class_counts)
+
+print (vsearch_phylum_counts)
+print (ecotag_phylum_counts)
+print (blast_phylum_counts)
+
+print (vsearch_kingdom_counts)
+print (ecotag_kingdom_counts)
+print (blast_kingdom_counts)
+
+```
+
+
+```{r taxon_97_venn}
+par(mfrow=c(1,3))
+vn_species <- list (0)
+vn_species[[1]] <- vsearch_taxonomy_uniq$species
+vn_species[[2]] <- ecotag_taxonomy_uniq$species
+vn_species[[3]] <- blast_taxonomy_uniq$species
+names (vn_species) <- c ("Vsearch", "Ecotag", "Blast")
+plot (Venn (vn_species), doWeights = FALSE)
+
+vn_genus <- list (0)
+vn_genus[[1]] <- vsearch_taxonomy_uniq$genus
+vn_genus[[2]] <- ecotag_taxonomy_uniq$genus
+vn_genus[[3]] <- blast_taxonomy_uniq$genus
+names (vn_genus) <- c ("Vsearch", "Ecotag", "Blast")
+plot (Venn (vn_genus), doWeights = FALSE)
+
+vn_family <- list (0)
+vn_family[[1]] <- vsearch_taxonomy_uniq$family
+vn_family[[2]] <- ecotag_taxonomy_uniq$family
+vn_family[[3]] <- blast_taxonomy_uniq$family
+names (vn_family) <- c ("Vsearch", "Ecotag", "Blast")
+plot (Venn (vn_family), doWeights = FALSE)
+
+vn_order <- list (0)
+vn_order[[1]] <- vsearch_taxonomy_uniq$order
+vn_order[[2]] <- ecotag_taxonomy_uniq$order
+vn_order[[3]] <- blast_taxonomy_uniq$order
+names (vn_order) <- c ("Vsearch", "Ecotag", "Blast")
+plot (Venn (vn_order), doWeights = FALSE)
+
+vn_class <- list (0)
+vn_class[[1]] <- vsearch_taxonomy_uniq$class
+vn_class[[2]] <- ecotag_taxonomy_uniq$class
+vn_class[[3]] <- blast_taxonomy_uniq$class
+names (vn_class) <- c ("Vsearch", "Ecotag", "Blast")
+plot (Venn (vn_class), doWeights = FALSE)
+
+vn_phylum <- list (0)
+vn_phylum[[1]] <- vsearch_taxonomy_uniq$phylum
+vn_phylum[[2]] <- ecotag_taxonomy_uniq$phylum
+vn_phylum[[3]] <- blast_taxonomy_uniq$phylum
+names (vn_phylum) <- c ("Vsearch", "Ecotag", "Blast")
+plot (Venn (vn_phylum), doWeights = FALSE)
+
+
+```
+
+
+## Investigate preditors
+
+```{r preditors}
+
+Predators_Samples$SAMPLE_ID <- make.names (Predators_Samples$SAMPLE_ID)
+
+# Build critters vs tubes
+
+##ovt_vsearch[ovt_vsearch$species == "Pseudorhombila quadridentata", "X558.A"]
+
+# Fix a sample ID error
+colnames (ovt_vsearch) <- gsub (x = colnames (ovt_vsearch), pattern = "B0", replacement = "B")
+colnames (ovt_ecotag) <- gsub (x = colnames (ovt_ecotag), pattern = "B0", replacement = "B")
+colnames (ovt_blast) <- gsub (x = colnames (ovt_blast), pattern = "B0", replacement = "B")
+
+predator_match_vsearch <- apply (X = Predators_Samples, MARGIN = 1, FUN = function (x) { sum(ovt_vsearch[ovt_vsearch$species == x[2], x[1]])  })
+predator_match_len_vsearch <- length (which (sapply (X = predator_match_vsearch, FUN = function (x) {x > 0})))
+predator_match_proportion_vsearch <- predator_match_len_vsearch / length (samples)
+
+predator_match_ecotag <- apply (X = Predators_Samples, MARGIN = 1, FUN = function (x) { sum (ovt_ecotag[ovt_ecotag$species == x[[2]], x[[1]]])  })
+predator_match_len_ecotag <- length (which (sapply (X = predator_match_ecotag, FUN = function (x) {x > 0})))
+predator_match_proportion_ecotag <- predator_match_len_ecotag / length (samples)
+
+predator_match_blast <- apply (X = Predators_Samples, MARGIN = 1, FUN = function (x) { sum (ovt_blast[ovt_blast$species == x[[2]], x[[1]]])  })
+predator_match_len_blast <- length (which (sapply (X = predator_match_blast, FUN = function (x) {x > 0})))
+predator_match_proportion_blast <- predator_match_len_blast / length (samples)
+
+predator_match_proportions <- cbind.data.frame ( c ("Vsearch", "Ecotag", "Blast"),
+                                                c (predator_match_proportion_vsearch, predator_match_proportion_ecotag, predator_match_proportion_blast))
+colnames(predator_match_proportions) <- c ("source", "proportions")
+
+
+p1 <- ggplot (data=predator_match_proportions, aes(y=proportions, x=source, fill=source)) + geom_bar(stat="identity", color = "black" ) + scale_fill_manual(values=c("#bebada", "#8dd3c7", "#ffffb3")) + ylim(0,1)
+
+
+```
+
+```{r preditors_97}
+
+##ovt_vsearch[ovt_vsearch$species == "Sardinella aurita", "X1049.G"]
+
+# Fix a sample ID error
+colnames (ovt_vsearch_97) <- gsub (x = colnames (ovt_vsearch), pattern = "B0", replacement = "B")
+colnames (ovt_ecotag_97) <- gsub (x = colnames (ovt_ecotag), pattern = "B0", replacement = "B")
+colnames (ovt_blast_97) <- gsub (x = colnames (ovt_blast), pattern = "B0", replacement = "B")
+
+predator_match_vsearch <- apply (X = Predators_Samples, MARGIN = 1, FUN = function (x) { sum (ovt_vsearch_97[ovt_vsearch_97$species == x[[2]], x[[1]]])  })
+predator_match_len_vsearch <- length (which (sapply (X = predator_match_vsearch, FUN = function (x) {x > 0 })))
+predator_match_proportion_vsearch <- predator_match_len_vsearch / length (samples)
+
+predator_match_ecotag <- apply (X = Predators_Samples, MARGIN = 1, FUN = function (x) { sum (ovt_ecotag_97[ovt_ecotag_97$species == x[[2]], x[[1]]])  })
+predator_match_len_ecotag <- length (which (sapply (X = predator_match_ecotag, FUN = function (x) {x > 0 })))
+predator_match_proportion_ecotag <- predator_match_len_ecotag / length (samples)
+
+predator_match_blast <- apply (X = Predators_Samples, MARGIN = 1, FUN = function (x) { sum (ovt_blast_97[ovt_blast_97$species == x[[2]], x[[1]]])  })
+predator_match_len_blast <- length (which (sapply (X = predator_match_blast, FUN = function (x) {x > 0})))
+predator_match_proportion_blast <- predator_match_len_blast / length (samples)
+
+predator_match_proportions_97 <- cbind.data.frame ( c ("Vsearch", "Ecotag", "Blast"),
+                                                c (predator_match_proportion_vsearch, predator_match_proportion_ecotag, predator_match_proportion_blast))
+colnames(predator_match_proportions_97) <- c ("source", "proportions")
+
+p2 <- ggplot (data=predator_match_proportions_97, aes(y=proportions, x=source, fill=source)) + geom_bar(stat="identity", color = "black" ) + scale_fill_manual(values=c("#bebada", "#8dd3c7", "#ffffb3")) + ylim(0,1)
+
+grid.arrange(p1, p2, ncol=2)
+
+```

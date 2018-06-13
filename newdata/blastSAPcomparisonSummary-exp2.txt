@@ -1,0 +1,11 @@
+
+Intersection            Number of Assigned OTUs
+Blast assignments       174
+SAP assignments         157
+Total OTU assignments   176
+OTUs that only Blast assigned       19
+OTUs that only SAP assigned         2
+Cases where Blast and SAP assigned same species     88
+Cases where Blast and SAP both assigned species, but mismatched     4
+Cases where SAP did a higher-level assignment       64
+Cases where SAP had a species-level assignment and no Blast assignment      1
